@@ -5,22 +5,22 @@ description: |
 
   Targets a SINGLE pubkey with two credential types in one payload-sized
   burst:
-    1. 8191 *validator* deposits with 0x01 (eth1) credentials and invalid
-       signatures, submitted FIRST.
+    1. `validatorDeposits` (default 5000) *validator* deposits with 0x01
+       (eth1) credentials and invalid signatures, submitted FIRST.
     2. 1 *builder* deposit with 0x03 credentials and a valid signature,
        submitted LAST.
 
   Why this is interesting:
-    - All 8191 validator deposits hit a pubkey that is unknown to the
-      registry, so each fails its signature check and its ETH is burned.
+    - All `validatorDeposits` validator deposits hit a pubkey that is unknown
+      to the registry, so each fails its signature check and its ETH is burned.
     - The single valid 0x03 deposit then onboards the builder for that same
       pubkey. A client must process the burns first and still correctly
       create the builder afterwards — distinguishing credential types for one
       pubkey and not letting the invalid prefix poison the valid deposit.
-    - 8191 + 1 == 8192 targets the per-block deposit limit, so the whole set
-      is meant to land in (about) one payload. Ordering is best-effort: Task A
-      fully lands its EL receipts before Task B submits, so its deposits sit
-      earlier in pending_deposits.
+    - 5000 + 1 == 5001 fits within the per-block deposit limit (8192), so the
+      whole set is meant to land in (about) one payload. Ordering is
+      best-effort: Task A fully lands its EL receipts before Task B submits, so
+      its deposits sit earlier in pending_deposits.
 
   Requires the `reuseIndex` flag on generate_batch_deposits (assertoor fork):
   both tasks use the SAME fresh mnemonic and startIndex 0, so both target the
@@ -36,13 +36,13 @@ config:
   walletPrivkey: ''
   depositContract: '0x00000000219ab540356cBB839Cbe05303d7705Fa'
   # Invalid 0x01 validator deposits to pile onto the single pubkey first.
-  validatorDeposits: 8191
+  validatorDeposits: 5000
   # Deposits per batch tx (CL validates every BLS signature individually).
   batchSize: 220
   # Hard cap of in-flight batch txs so we don't drown the mempool.
   pendingBatches: 32
-  # Deposits per slot. 8192 targets the per-block deposit limit so the 8191
-  # invalid + 1 valid set aims to land in (about) one payload.
+  # Deposits per slot. 8192 = per-block deposit limit, so the validatorDeposits
+  # invalid + 1 valid set (5001 by default) aims to land in (about) one payload.
   perSlot: 8192
   # ETH per deposit. 1 ETH is the floor (MIN_DEPOSIT_AMOUNT).
   depositAmount: 1
@@ -87,8 +87,8 @@ tasks:
     id: spam_mnemonic
     title: Generate fresh mnemonic (only index 0 is ever used)
 
-  # Task A: 8191 invalid 0x01 validator deposits, all pinned to the index-0
-  # pubkey, each with a fresh random invalid signature. Submitted first.
+  # Task A: validatorDeposits invalid 0x01 validator deposits, all pinned to the
+  # index-0 pubkey, each with a fresh random invalid signature. Submitted first.
   - name: generate_batch_deposits
     id: invalid_validators
     title: Spam ${validatorDeposits} invalid 0x01 validator deposits for one pubkey
