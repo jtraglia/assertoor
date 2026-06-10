@@ -1,41 +1,38 @@
-id: builder-deposit-same-pubkey-validator-then-builder
-name: "GLOAS: Post-fork same-pubkey invalid validators, then a valid validator, then a valid builder"
+id: builder-deposit-same-pubkey-validator-spam
+name: "GLOAS: Post-fork same-pubkey invalid validator deposits, then a valid builder"
 description: |
-  Scenario 3.2 of the builder-deposit stress suite (a variation of scenario
-  3.1, builder-deposit-same-pubkey-validator-spam).
+  Scenario 5 of the builder-deposit stress suite (a variation of scenario 3, s3).
 
-  Runs entirely POST-GLOAS and drives a single pubkey through three stages,
-  in this order:
+  Unlike scenario 3 (which spams invalid 0x03 *builder* deposits before the
+  fork), this runs entirely POST-GLOAS and spams invalid 0x01 *validator*
+  deposits:
 
     1. `invalidValidatorDeposits` (default 50000) validator deposits with 0x01
-       credentials and invalid signatures (each different).
-    2. Exactly ONE valid 0x01 validator deposit — onboards the pubkey as a
-       regular validator.
-    3. Exactly ONE valid 0x03 builder deposit for that same pubkey.
+       credentials, ALL targeting a single pubkey, each carrying a different
+       invalid signature.
+    2. Exactly ONE valid 0x03 builder deposit for that same pubkey.
 
-  All three stages target the same pubkey (same mnemonic, index 0). The 50k
-  invalid deposits are burned as they process (unknown pubkey + bad signature).
-  The valid 0x01 deposit then onboards the pubkey as a validator. The final
-  0x03 deposit arrives for a pubkey that is ALREADY a validator — this is the
-  edge case under test: a deposit for an existing validator is a balance
-  top-up (signature skipped, withdrawal credentials ignored), so it should NOT
-  convert the validator into a builder. The scenario checks the client handles
-  this validator-then-builder collision on one pubkey without breaking
-  finality, and that no builder is spuriously onboarded.
+  Everything is submitted after GLOAS activates (starting in epoch 1). The
+  50k invalid validator deposits pile into pending_deposits for one pubkey;
+  since that pubkey is unknown to the registry and the signatures are invalid,
+  each is burned as it is processed. The single valid 0x03 deposit then
+  onboards the builder for that same pubkey. This checks that a long run of
+  invalid same-pubkey *validator* deposits does not poison the later *builder*
+  onboarding, and that the chain stays healthy throughout.
 
   Requires the `reuseIndex` flag on generate_batch_deposits (assertoor fork)
   to pin every deposit to one derived key.
 
   Submission is fire-and-forget at the consensus layer (awaitReceipt only);
   awaitInclusion is NOT used because it tracks deposits by pubkey and cannot
-  count same-pubkey deposits. The stages run sequentially (each waits for EL
-  receipts before the next), so queue order is invalid spam -> valid validator
-  -> valid builder.
+  count same-pubkey deposits. The valid builder deposit is submitted only after
+  the invalid validator deposits have EL receipts, so it sits behind them in
+  the queue.
 
   Optional `skipForkActivationCheck` to bypass the GLOAS-epoch wait on
   long-running devnets.
 version: 1.0.0
-tags: [gloas, builder, deposit, eip-6110, postfork, same-pubkey, validator, topup, stability]
+tags: [gloas, builder, deposit, eip-6110, postfork, same-pubkey, validator, burn, stability]
 timeout: 2h
 config:
   walletPrivkey: ''
@@ -82,11 +79,11 @@ tasks:
     id: spam_wallet
     title: Generate funded wallet for the same-pubkey deposits
     config:
-      walletSeed: builder-deposit-same-pubkey-validator-then-builder
+      walletSeed: builder-deposit-same-pubkey-validator
     configVars:
       privateKey: walletPrivkey
-      # (invalid validators + 1 valid validator + 1 valid builder) * depositAmount + 200 ETH headroom.
-      prefundMinBalance: '| ((.invalidValidatorDeposits + 2) * .depositAmount + 200) * 1000000000000000000'
+      # (invalid validators + 1 valid builder) * depositAmount + 200 ETH headroom.
+      prefundMinBalance: '| ((.invalidValidatorDeposits + 1) * .depositAmount + 200) * 1000000000000000000'
 
   - name: get_random_mnemonic
     id: spam_mnemonic
@@ -94,7 +91,7 @@ tasks:
 
   # Stage 1: invalidValidatorDeposits invalid 0x01 validator deposits, ALL
   # pinned to the index-0 pubkey, each with a fresh random invalid signature.
-  # Deploys the batch contract used by all stages.
+  # Deploys the batch contract used by both stages.
   - name: generate_batch_deposits
     id: invalid_validators
     title: Spam ${invalidValidatorDeposits} invalid 0x01 validator deposits for one pubkey
@@ -118,35 +115,11 @@ tasks:
       # 0x01 eth1 withdrawal credentials — version byte + 11 zero bytes + 20-byte address.
       withdrawalCredentials: '| "0x01" + ("00" * 11) + (.tasks.spam_wallet.outputs.childWallet.address | ltrimstr("0x"))'
 
-  # Stage 2: one VALID 0x01 validator deposit for the SAME pubkey — onboards it
-  # as a regular validator. Reuses the batch contract from stage 1.
-  - name: generate_batch_deposits
-    id: valid_validator
-    title: Submit the single valid 0x01 validator deposit for the same pubkey
-    timeout: 15m
-    config:
-      reuseIndex: true
-      startIndex: 0
-      invalidSigPercent: 0
-      batchSize: 1
-      awaitReceipt: true
-      awaitInclusion: false
-      failOnReject: true
-    configVars:
-      walletPrivkey: tasks.spam_wallet.outputs.childWallet.privkey
-      mnemonic: tasks.spam_mnemonic.outputs.mnemonic
-      depositContract: depositContract
-      batchContract: tasks.invalid_validators.outputs.batchContract
-      limitTotal: "| 1"
-      depositAmount: depositAmount
-      # 0x01 eth1 withdrawal credentials — version byte + 11 zero bytes + 20-byte address.
-      withdrawalCredentials: '| "0x01" + ("00" * 11) + (.tasks.spam_wallet.outputs.childWallet.address | ltrimstr("0x"))'
-
-  # Stage 3: one VALID 0x03 builder deposit for the SAME pubkey — which is now
-  # already a validator. Reuses the batch contract from stage 1.
+  # Stage 2: one VALID 0x03 builder deposit for the SAME pubkey (same mnemonic,
+  # same index 0), reusing the batch contract from stage 1.
   - name: generate_batch_deposits
     id: valid_builder
-    title: Submit the single valid 0x03 builder deposit for the same (now-validator) pubkey
+    title: Submit the single valid 0x03 builder deposit for the same pubkey
     timeout: 15m
     config:
       reuseIndex: true
@@ -167,7 +140,7 @@ tasks:
       withdrawalCredentials: '| "0x03" + ("00" * 11) + (.tasks.spam_wallet.outputs.childWallet.address | ltrimstr("0x"))'
 
   - name: check_consensus_finality
-    title: Verify the chain still finalizes through the validator-then-builder collision
+    title: Verify the chain still finalizes under same-pubkey validator-deposit load
     timeout: 30m
     config:
       minFinalizedEpochs: 1

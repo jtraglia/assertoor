@@ -1,0 +1,96 @@
+id: gloas-deposit-s2-invalid-sigs
+name: "GLOAS: Bulk 0x03 builder deposits with invalid signatures sprinkled in"
+description: |
+  Scenario 2 of the builder-deposit stress suite.
+
+  Same bulk 0x03 builder-deposit spam as scenario 1 (s1), but a percentage of
+  the deposits (`invalidSigPerc`, default 10%) carry corrupted signatures. The
+  invalid ones cannot be batch-verified with the rest, forcing per-deposit
+  signature checks, and their ETH is burned (the pubkey is never onboarded).
+  The valid remainder still onboard builders. Asserts the chain finalizes
+  despite the mixed valid/invalid load.
+
+  Optional `skipForkActivationCheck` to bypass the GLOAS-epoch wait on
+  long-running devnets.
+version: 1.0.0
+tags: [gloas, builder, deposit, eip-6110, spam, invalid-sig, burn, stability]
+timeout: 2h
+config:
+  walletPrivkey: ''
+  depositContract: '0x00000000219ab540356cBB839Cbe05303d7705Fa'
+  # Total builder deposits to push through the chain.
+  totalDeposits: 65536
+  # Each batch tx fans out into batchSize deposits; CL validates every BLS signature individually.
+  batchSize: 220
+  # Hard cap of in-flight batch txs so we don't drown the mempool (~8192/block).
+  pendingBatches: 32
+  # ETH per deposit. 1 ETH is the floor (MIN_DEPOSIT_AMOUNT).
+  depositAmount: 1
+  # Percentage (0-100) of deposits with corrupted signatures (these are burned).
+  invalidSigPerc: 10
+  # Set true to skip waiting for the GLOAS fork to activate before spamming.
+  skipForkActivationCheck: false
+tasks:
+  - name: check_clients_are_healthy
+    title: Check that at least one client is ready
+    timeout: 5m
+    config:
+      minClientCount: 1
+
+  - name: get_consensus_specs
+    id: get_specs
+    title: Get consensus chain specs
+    if: "skipForkActivationCheck == false"
+
+  - name: check_consensus_slot_range
+    title: "Wait for GLOAS activation (epoch >= ${{ tasks.get_specs.outputs.specs.GLOAS_FORK_EPOCH }})"
+    timeout: 1h
+    if: "skipForkActivationCheck == false"
+    configVars:
+      minEpochNumber: "tasks.get_specs.outputs.specs.GLOAS_FORK_EPOCH"
+
+  - name: check_consensus_block_proposals
+    title: "Wait for block proposal to fix fee estimation"
+    config:
+      blockCount: 2
+      checkLookback: 0
+
+  - name: generate_child_wallet
+    id: spam_wallet
+    title: Generate funded wallet for batched deposits
+    config:
+      walletSeed: gloas-deposit-s2-invalid-sigs
+    configVars:
+      privateKey: walletPrivkey
+      prefundMinBalance: '| ((.totalDeposits * .depositAmount + 50) * 1000000000000000000)'
+
+  - name: get_random_mnemonic
+    id: spam_mnemonic
+    title: Generate fresh mnemonic for spam validators
+
+  - name: generate_batch_deposits
+    title: Deploy BatchDeposit and spam ${totalDeposits} 0x03 builder deposits (${invalidSigPerc}% invalid sigs) in batches of ${batchSize}
+    timeout: 90m
+    config:
+      awaitReceipt: true
+      awaitInclusion: false
+      failOnReject: true
+    configVars:
+      walletPrivkey: tasks.spam_wallet.outputs.childWallet.privkey
+      mnemonic: tasks.spam_mnemonic.outputs.mnemonic
+      depositContract: depositContract
+      batchSize: batchSize
+      limitTotal: totalDeposits
+      limitPendingBatches: pendingBatches
+      depositAmount: depositAmount
+      invalidSigPercent: invalidSigPerc
+      # 0x03 builder withdrawal credentials — version byte + 11 zero bytes + 20-byte address.
+      withdrawalCredentials: '| "0x03" + ("00" * 11) + (.tasks.spam_wallet.outputs.childWallet.address | ltrimstr("0x"))'
+
+  - name: check_consensus_finality
+    title: Verify the chain still finalizes under mixed valid/invalid deposit load
+    timeout: 15m
+    config:
+      minFinalizedEpochs: 1
+      maxUnfinalizedEpochs: 4
+      failOnCheckMiss: true
