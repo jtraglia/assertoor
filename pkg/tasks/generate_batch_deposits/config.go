@@ -11,6 +11,7 @@ type Config struct {
 	Mnemonic              string `yaml:"mnemonic" json:"mnemonic" require:"B" desc:"Mnemonic phrase used to generate validator keys."`
 	StartIndex            int    `yaml:"startIndex" json:"startIndex" desc:"Index within the mnemonic from which to start generating validator keys."`
 	IndexCount            int    `yaml:"indexCount" json:"indexCount" require:"A.3" desc:"Number of validator keys to generate from the mnemonic."`
+	ReuseIndex            bool   `yaml:"reuseIndex" json:"reuseIndex" desc:"If true, every deposit reuses the single key at startIndex (one repeated pubkey) instead of advancing the index. Requires limitTotal. Use with invalidSigPercent to spam many distinct invalid-signature deposits for the same pubkey."`
 	WalletPrivkey         string `yaml:"walletPrivkey" json:"walletPrivkey" require:"C" desc:"Private key of the wallet used to fund deposit transactions and (if needed) deploy the batch contract."`
 	DepositContract       string `yaml:"depositContract" json:"depositContract" require:"D" desc:"Address of the beacon chain deposit contract on the execution layer."`
 	BatchContract         string `yaml:"batchContract" json:"batchContract" desc:"Address of an already-deployed BatchDeposit forwarder contract. If empty, a fresh contract is deployed at task start."`
@@ -44,6 +45,12 @@ func DefaultConfig() Config {
 func (c *Config) Validate() error {
 	if c.LimitPerSlot == 0 && c.LimitTotal == 0 && c.IndexCount == 0 {
 		return errors.New("either limitPerSlot or limitTotal or indexCount must be set")
+	}
+
+	if c.ReuseIndex && c.LimitTotal == 0 {
+		// With a pinned index the loop can't terminate on index exhaustion, so a
+		// total bound is mandatory.
+		return errors.New("reuseIndex requires limitTotal to be set")
 	}
 
 	if c.Mnemonic == "" {

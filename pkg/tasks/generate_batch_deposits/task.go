@@ -176,7 +176,10 @@ func (t *Task) Execute(ctx context.Context) error {
 		t.nextIndex = uint64(t.config.StartIndex)
 	}
 
-	if t.config.IndexCount > 0 {
+	// When the index is pinned (reuseIndex), nextIndex never advances, so any
+	// index-based termination would never fire. Leave lastIndex at 0 and let
+	// limitTotal bound the run instead.
+	if t.config.IndexCount > 0 && !t.config.ReuseIndex {
 		t.lastIndex = t.nextIndex + uint64(t.config.IndexCount)
 	}
 
@@ -603,7 +606,11 @@ func (t *Task) prepareBatch(count int) ([]preparedDeposit, []string, error) {
 
 	for i := 0; i < count; i++ {
 		accountIdx := t.nextIndex
-		t.nextIndex++
+		if !t.config.ReuseIndex {
+			// reuseIndex keeps accountIdx pinned at StartIndex so every deposit
+			// targets the same pubkey (termination then relies on limitTotal).
+			t.nextIndex++
+		}
 
 		pd, err := t.prepareSingle(accountIdx, domain, depositAmountGwei.Uint64())
 		if err != nil {
