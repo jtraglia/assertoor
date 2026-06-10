@@ -6,14 +6,10 @@ description: |
   Builds a large pending_deposits backlog *before* GLOAS activates so the
   fork has to process it from its first slot. The backlog is, in order:
 
-    1. A buffer of `bufferDeposits` (default 20000) VALID validator deposits
-       (0x01 credentials, 1 ETH each, unique pubkeys). These sit at the FRONT
-       of the queue and keep the builder deposits behind them from draining
-       before the fork.
-    2. `invalidBuilderDeposits` (default 50000) builder deposits with 0x03
+    1. `invalidBuilderDeposits` (default 50000) builder deposits with 0x03
        credentials, ALL targeting a single pubkey, each carrying a different
        invalid signature.
-    3. Exactly ONE valid 0x03 deposit for that same pubkey.
+    2. Exactly ONE valid 0x03 deposit for that same pubkey.
 
   Everything is submitted in epoch 0, before the GLOAS activation slot, so at
   the fork the queue holds the full backlog with the same-pubkey builder
@@ -29,8 +25,7 @@ description: |
   gloas_fork_epoch in the kurtosis config (or lower the deposit counts).
 
   Requires the `reuseIndex` flag on generate_batch_deposits (assertoor fork)
-  to pin every builder deposit to one derived key. The buffer uses ordinary
-  unique-pubkey deposits and needs no special support.
+  to pin every builder deposit to one derived key.
 
   Submission is fire-and-forget at the consensus layer (awaitReceipt only);
   awaitInclusion is NOT used because it tracks deposits by pubkey and cannot
@@ -42,9 +37,6 @@ timeout: 2h
 config:
   walletPrivkey: ''
   depositContract: '0x00000000219ab540356cBB839Cbe05303d7705Fa'
-  # Buffer of valid validator deposits queued ahead of the builder deposits so
-  # the builder deposits stay pending until the fork.
-  bufferDeposits: 20000
   # Invalid-signature 0x03 deposits piled onto the single builder pubkey.
   # Each burns `depositAmount` ETH; raise it to burn more ETH at the fork.
   invalidBuilderDeposits: 50000
@@ -83,45 +75,16 @@ tasks:
       walletSeed: builder-deposit-same-pubkey
     configVars:
       privateKey: walletPrivkey
-      # (buffer + invalid builders + 1 valid) * depositAmount + 200 ETH headroom.
-      prefundMinBalance: '| ((.bufferDeposits + .invalidBuilderDeposits + 1) * .depositAmount + 200) * 1000000000000000000'
-
-  - name: get_random_mnemonic
-    id: buffer_mnemonic
-    title: Generate fresh mnemonic for the validator buffer
+      # (invalid builders + 1 valid) * depositAmount + 200 ETH headroom.
+      prefundMinBalance: '| ((.invalidBuilderDeposits + 1) * .depositAmount + 200) * 1000000000000000000'
 
   - name: get_random_mnemonic
     id: builder_mnemonic
     title: Generate fresh mnemonic for the builder pubkey (only index 0 is used)
 
-  # Stage 1: buffer — bufferDeposits VALID 0x01 validator deposits with unique
-  # pubkeys. Queued first so they sit ahead of the builder deposits.
-  - name: generate_batch_deposits
-    id: buffer_fill
-    title: Queue ${bufferDeposits} valid 1-ETH validator deposits (buffer)
-    timeout: 60m
-    config:
-      invalidSigPercent: 0
-      awaitReceipt: true
-      awaitInclusion: false
-      failOnReject: true
-    configVars:
-      walletPrivkey: tasks.spam_wallet.outputs.childWallet.privkey
-      mnemonic: tasks.buffer_mnemonic.outputs.mnemonic
-      depositContract: depositContract
-      batchSize: batchSize
-      limitTotal: bufferDeposits
-      indexCount: bufferDeposits
-      startIndex: "| 0"
-      limitPerSlot: perSlot
-      limitPendingBatches: pendingBatches
-      depositAmount: depositAmount
-      # 0x01 eth1 withdrawal credentials — version byte + 11 zero bytes + 20-byte address.
-      withdrawalCredentials: '| "0x01" + ("00" * 11) + (.tasks.spam_wallet.outputs.childWallet.address | ltrimstr("0x"))'
-
-  # Stage 2: invalidBuilderDeposits invalid 0x03 deposits, ALL pinned to the
+  # Stage 1: invalidBuilderDeposits invalid 0x03 deposits, ALL pinned to the
   # index-0 builder pubkey, each with a fresh random invalid signature.
-  # Reuses the batch contract deployed in stage 1.
+  # Deploys the batch contract used by both stages.
   - name: generate_batch_deposits
     id: invalid_spam
     title: Queue ${invalidBuilderDeposits} invalid 0x03 deposits for one pubkey
@@ -137,7 +100,6 @@ tasks:
       walletPrivkey: tasks.spam_wallet.outputs.childWallet.privkey
       mnemonic: tasks.builder_mnemonic.outputs.mnemonic
       depositContract: depositContract
-      batchContract: tasks.buffer_fill.outputs.batchContract
       batchSize: batchSize
       limitTotal: invalidBuilderDeposits
       limitPerSlot: perSlot
@@ -146,8 +108,8 @@ tasks:
       # 0x03 builder withdrawal credentials — version byte + 11 zero bytes + 20-byte address.
       withdrawalCredentials: '| "0x03" + ("00" * 11) + (.tasks.spam_wallet.outputs.childWallet.address | ltrimstr("0x"))'
 
-  # Stage 3: one VALID 0x03 deposit for the SAME pubkey (same builder mnemonic,
-  # same index 0), reusing the batch contract.
+  # Stage 2: one VALID 0x03 deposit for the SAME pubkey (same builder mnemonic,
+  # same index 0), reusing the batch contract from stage 1.
   - name: generate_batch_deposits
     id: valid_closer
     title: Queue the single valid 0x03 deposit for the same pubkey
@@ -164,7 +126,7 @@ tasks:
       walletPrivkey: tasks.spam_wallet.outputs.childWallet.privkey
       mnemonic: tasks.builder_mnemonic.outputs.mnemonic
       depositContract: depositContract
-      batchContract: tasks.buffer_fill.outputs.batchContract
+      batchContract: tasks.invalid_spam.outputs.batchContract
       limitTotal: "| 1"
       depositAmount: depositAmount
       withdrawalCredentials: '| "0x03" + ("00" * 11) + (.tasks.spam_wallet.outputs.childWallet.address | ltrimstr("0x"))'
