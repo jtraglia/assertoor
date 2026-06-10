@@ -653,24 +653,31 @@ func (t *Task) prepareSingle(accountIdx uint64, domain common.BLSDomain, amountG
 		makeInvalid = int(b[0])%100 < t.config.InvalidSigPercent
 	}
 
+	var secKey hbls.SecretKey
+	if err := secKey.Deserialize(validatorPriv.Marshal()); err != nil {
+		return preparedDeposit{}, fmt.Errorf("cannot convert validator priv key: %w", err)
+	}
+
+	var msg common.Root
+
 	if makeInvalid {
-		if _, err := cryptorand.Read(depositData.Signature[:]); err != nil {
-			return preparedDeposit{}, fmt.Errorf("failed to generate random invalid signature: %w", err)
+		// Produce a well-formed but WRONG signature: a real BLS signature over a
+		// random message. It is a valid, in-subgroup G2 point that decompresses
+		// fine, so verification pays the full pairing cost (~800µs) instead of
+		// failing cheap G2 decompression (~4µs) like 96 random bytes would. Each
+		// is distinct, so same-pubkey deposits can't be deduplicated.
+		if _, err := cryptorand.Read(msg[:]); err != nil {
+			return preparedDeposit{}, fmt.Errorf("failed to read random message: %w", err)
 		}
 
-		t.logger.Debugf("generated deposit with invalid (random) signature for pubkey 0x%x", pub)
+		t.logger.Debugf("generated deposit with wrong (well-formed) signature for pubkey 0x%x", pub)
 	} else {
 		msgRoot := depositData.ToMessage().HashTreeRoot(tree.GetHashFn())
-		signingRoot := common.ComputeSigningRoot(msgRoot, domain)
-
-		var secKey hbls.SecretKey
-		if err := secKey.Deserialize(validatorPriv.Marshal()); err != nil {
-			return preparedDeposit{}, fmt.Errorf("cannot convert validator priv key: %w", err)
-		}
-
-		sig := secKey.SignHash(signingRoot[:])
-		copy(depositData.Signature[:], sig.Serialize())
+		msg = common.ComputeSigningRoot(msgRoot, domain)
 	}
+
+	sig := secKey.SignHash(msg[:])
+	copy(depositData.Signature[:], sig.Serialize())
 
 	dataRoot := depositData.HashTreeRoot(tree.GetHashFn())
 

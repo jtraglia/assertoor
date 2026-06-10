@@ -618,27 +618,33 @@ func (t *Task) signDepositData(depositData *common.DepositData, validatorPrivkey
 		return err
 	}
 
-	if useInvalid {
-		if _, err := cryptorand.Read(depositData.Signature[:]); err != nil {
-			return fmt.Errorf("failed to generate random invalid signature: %w", err)
-		}
-
-		t.logger.Debugf("generated deposit with invalid (random) signature for pubkey 0x%x", depositData.Pubkey)
-
-		return nil
-	}
-
-	msgRoot := depositData.ToMessage().HashTreeRoot(tree.GetHashFn())
-
 	var secKey hbls.SecretKey
 	if err := secKey.Deserialize(validatorPrivkey.Marshal()); err != nil {
 		return fmt.Errorf("cannot convert validator priv key")
 	}
 
-	clientPool := t.ctx.Scheduler.GetServices().ClientPool()
-	genesis := clientPool.GetConsensusPool().GetBlockCache().GetGenesis()
-	dom := common.ComputeDomain(common.DOMAIN_DEPOSIT, common.Version(genesis.GenesisForkVersion), common.Root{})
-	msg := common.ComputeSigningRoot(msgRoot, dom)
+	var msg common.Root
+
+	if useInvalid {
+		// Produce a well-formed but WRONG signature: a real BLS signature over a
+		// random message. It is a valid, in-subgroup G2 point that decompresses
+		// fine, so verification pays the full pairing cost (~800µs) instead of
+		// failing cheap G2 decompression (~4µs) like 96 random bytes would. Each
+		// is distinct, so same-pubkey deposits can't be deduplicated.
+		if _, err := cryptorand.Read(msg[:]); err != nil {
+			return fmt.Errorf("failed to read random message: %w", err)
+		}
+
+		t.logger.Debugf("generated deposit with wrong (well-formed) signature for pubkey 0x%x", depositData.Pubkey)
+	} else {
+		msgRoot := depositData.ToMessage().HashTreeRoot(tree.GetHashFn())
+
+		clientPool := t.ctx.Scheduler.GetServices().ClientPool()
+		genesis := clientPool.GetConsensusPool().GetBlockCache().GetGenesis()
+		dom := common.ComputeDomain(common.DOMAIN_DEPOSIT, common.Version(genesis.GenesisForkVersion), common.Root{})
+		msg = common.ComputeSigningRoot(msgRoot, dom)
+	}
+
 	sig := secKey.SignHash(msg[:])
 	copy(depositData.Signature[:], sig.Serialize())
 
