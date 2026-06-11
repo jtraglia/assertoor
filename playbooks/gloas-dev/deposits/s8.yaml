@@ -1,9 +1,9 @@
 id: validator-flood-invalid-builder-postfork
 name: "GLOAS: Post-fork same-pubkey invalid validator flood, then an invalid builder"
 description: |
-  Scenario 8 of the builder-deposit stress suite (a variation of scenario 5, s5).
+  Scenario 8 of the builder-deposit stress suite (a variation of scenario 6, s6).
 
-  Runs entirely POST-GLOAS. Like scenario 5 (s5) but the final builder deposit
+  Runs entirely POST-GLOAS. Like scenario 6 (s6) but the final builder deposit
   is INVALID instead of valid:
 
     1. `invalidValidatorDeposits` (default 50000) validator deposits with 0x01

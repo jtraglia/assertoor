@@ -1,44 +1,47 @@
-id: builder-deposit-same-pubkey-validator-spam
-name: "GLOAS: Post-fork same-pubkey invalid validator deposits, then a valid builder"
+id: validator-deposit-same-pubkey-prefork
+name: "GLOAS: Pre-fork pending_deposits with same-pubkey invalid validator deposits"
 description: |
   Scenario 5 of the builder-deposit stress suite (a variation of scenario 3, s3).
 
-  Unlike scenario 3 (which spams invalid 0x03 *builder* deposits before the
-  fork), this runs entirely POST-GLOAS and spams invalid 0x01 *validator*
-  deposits:
+  Identical to scenario 3 except the pre-fork flood is invalid 0x01 *validator*
+  deposits rather than invalid 0x03 *builder* deposits.
+
+  Builds a large pending_deposits backlog *before* GLOAS activates so the
+  fork has to process it from its first slot. The backlog is, in order:
 
     1. `invalidValidatorDeposits` (default 50000) validator deposits with 0x01
        credentials, ALL targeting a single pubkey, each carrying a different
        invalid signature.
     2. Exactly ONE valid 0x03 builder deposit for that same pubkey.
 
-  Everything is submitted after GLOAS activates (starting in epoch 1). The
-  50k invalid validator deposits pile into pending_deposits for one pubkey;
-  since that pubkey is unknown to the registry and the signatures are invalid,
-  each is burned as it is processed. The single valid 0x03 deposit then
-  onboards the builder for that same pubkey. This checks that a long run of
-  invalid same-pubkey *validator* deposits does not poison the later *builder*
-  onboarding, and that the chain stays healthy throughout.
+  Everything is submitted in epoch 0, before the GLOAS activation slot, so at
+  the fork the queue holds the full backlog with the same-pubkey deposits still
+  pending. Under GLOAS, each invalid same-pubkey deposit fails its signature
+  check individually and its ETH is burned; the single valid deposit then
+  onboards the builder. The amount of ETH an attacker can burn scales with
+  `invalidValidatorDeposits` * `depositAmount`.
+
+  IMPORTANT — timing: all deposits must be EL-included before the GLOAS
+  activation slot for the pre-fork premise to hold. With gloas_fork_epoch=1
+  that window is a single epoch (~32 slots), which is tight for tens of
+  thousands of deposits. If the fill spills past activation, raise
+  gloas_fork_epoch in the kurtosis config (or lower the deposit counts).
 
   Requires the `reuseIndex` flag on generate_batch_deposits (assertoor fork)
   to pin every deposit to one derived key.
 
   Submission is fire-and-forget at the consensus layer (awaitReceipt only);
   awaitInclusion is NOT used because it tracks deposits by pubkey and cannot
-  count same-pubkey deposits. The valid builder deposit is submitted only after
-  the invalid validator deposits have EL receipts, so it sits behind them in
-  the queue.
-
-  Optional `skipForkActivationCheck` to bypass the GLOAS-epoch wait on
-  long-running devnets.
+  count same-pubkey deposits. Ordering is enforced by submitting the stages
+  sequentially (each waits for EL receipts before the next begins).
 version: 1.0.0
-tags: [gloas, builder, deposit, eip-6110, postfork, same-pubkey, validator, burn, stability]
+tags: [gloas, builder, deposit, eip-6110, prefork, queue, same-pubkey, validator, burn, stability]
 timeout: 2h
 config:
   walletPrivkey: ''
   depositContract: '0x00000000219ab540356cBB839Cbe05303d7705Fa'
   # Invalid-signature 0x01 validator deposits piled onto the single pubkey.
-  # Each burns `depositAmount` ETH.
+  # Each burns `depositAmount` ETH; raise it to burn more ETH at the fork.
   invalidValidatorDeposits: 50000
   # Deposits per batch tx (CL validates every BLS signature individually).
   batchSize: 220
@@ -48,8 +51,6 @@ config:
   perSlot: 8192
   # ETH per deposit. 1 ETH is the floor (MIN_DEPOSIT_AMOUNT).
   depositAmount: 1
-  # Set true to skip waiting for the GLOAS fork to activate before spamming.
-  skipForkActivationCheck: false
 tasks:
   - name: check_clients_are_healthy
     title: Check that at least one client is ready
@@ -57,17 +58,12 @@ tasks:
     config:
       minClientCount: 1
 
+  # Fetch specs up front (for the post-fork finality gate below). We do NOT
+  # wait for the fork before submitting — the whole point is to fill the queue
+  # while still in epoch 0.
   - name: get_consensus_specs
     id: get_specs
     title: Get consensus chain specs
-    if: "skipForkActivationCheck == false"
-
-  - name: check_consensus_slot_range
-    title: "Wait for GLOAS activation (epoch >= ${{ tasks.get_specs.outputs.specs.GLOAS_FORK_EPOCH }})"
-    timeout: 1h
-    if: "skipForkActivationCheck == false"
-    configVars:
-      minEpochNumber: "tasks.get_specs.outputs.specs.GLOAS_FORK_EPOCH"
 
   - name: check_consensus_block_proposals
     title: "Wait for block proposal to fix fee estimation"
@@ -77,9 +73,9 @@ tasks:
 
   - name: generate_child_wallet
     id: spam_wallet
-    title: Generate funded wallet for the same-pubkey deposits
+    title: Generate funded wallet for the pre-fork queue fill
     config:
-      walletSeed: builder-deposit-same-pubkey-validator
+      walletSeed: validator-deposit-same-pubkey-prefork
     configVars:
       privateKey: walletPrivkey
       # (invalid validators + 1 valid builder) * depositAmount + 200 ETH headroom.
@@ -94,7 +90,7 @@ tasks:
   # Deploys the batch contract used by both stages.
   - name: generate_batch_deposits
     id: invalid_validators
-    title: Spam ${invalidValidatorDeposits} invalid 0x01 validator deposits for one pubkey
+    title: Queue ${invalidValidatorDeposits} invalid 0x01 validator deposits for one pubkey
     timeout: 90m
     config:
       reuseIndex: true
@@ -118,8 +114,8 @@ tasks:
   # Stage 2: one VALID 0x03 builder deposit for the SAME pubkey (same mnemonic,
   # same index 0), reusing the batch contract from stage 1.
   - name: generate_batch_deposits
-    id: valid_builder
-    title: Submit the single valid 0x03 builder deposit for the same pubkey
+    id: valid_closer
+    title: Queue the single valid 0x03 builder deposit for the same pubkey
     timeout: 15m
     config:
       reuseIndex: true
@@ -139,8 +135,15 @@ tasks:
       # 0x03 builder withdrawal credentials — version byte + 11 zero bytes + 20-byte address.
       withdrawalCredentials: '| "0x03" + ("00" * 11) + (.tasks.spam_wallet.outputs.childWallet.address | ltrimstr("0x"))'
 
+  # Now let the fork hit the pre-built queue and confirm the chain survives it.
+  - name: check_consensus_slot_range
+    title: "Wait for GLOAS activation (epoch >= ${{ tasks.get_specs.outputs.specs.GLOAS_FORK_EPOCH }})"
+    timeout: 1h
+    configVars:
+      minEpochNumber: "tasks.get_specs.outputs.specs.GLOAS_FORK_EPOCH"
+
   - name: check_consensus_finality
-    title: Verify the chain still finalizes under same-pubkey validator-deposit load
+    title: Verify the chain still finalizes after processing the pre-fork queue
     timeout: 30m
     config:
       minFinalizedEpochs: 1
